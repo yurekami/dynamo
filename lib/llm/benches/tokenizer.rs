@@ -90,5 +90,82 @@ pub fn decode_big(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, encode, decode, decode_big);
+/// Benchmark for batch encoding - measures throughput when encoding multiple prompts simultaneously.
+/// This is critical for inference servers that batch requests together.
+/// `cargo bench -- encode_batch` to run it
+pub fn encode_batch(c: &mut Criterion) {
+    // Create a diverse batch of prompts with varying lengths
+    const BATCH_SIZES: [usize; 3] = [8, 32, 64];
+
+    let encoder = HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap();
+
+    for batch_size in BATCH_SIZES {
+        // Create batch with varying prompt lengths for realistic workload
+        let batch: Vec<&str> = (0..batch_size)
+            .map(|i| {
+                // Vary prompt length: short, medium, long based on position
+                match i % 3 {
+                    0 => "Hello, how are you?",
+                    1 => INPUT_STR,
+                    _ => "The quick brown fox jumps over the lazy dog. This is a medium length prompt for testing batch encoding performance.",
+                }
+            })
+            .collect();
+
+        let total_bytes: usize = batch.iter().map(|s| s.len()).sum();
+
+        let mut group = c.benchmark_group(format!("encode-batch-{}", batch_size));
+        group.throughput(Throughput::Bytes(total_bytes as u64));
+        group.bench_function(format!("tokenizer_encode_batch_{}", batch_size), |b| {
+            b.iter(|| {
+                let _ = encoder.encode_batch(black_box(&batch)).unwrap();
+            })
+        });
+        group.finish();
+    }
+}
+
+/// Benchmark for encoding edge cases - measures performance on challenging inputs
+/// `cargo bench -- encode_edge_cases` to run it
+pub fn encode_edge_cases(c: &mut Criterion) {
+    let encoder = HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap();
+
+    let mut group = c.benchmark_group("encode-edge-cases");
+
+    // Empty string
+    group.bench_function("encode_empty", |b| {
+        b.iter(|| {
+            let _ = encoder.encode(black_box("")).unwrap();
+        })
+    });
+
+    // Unicode-heavy text (emojis, CJK characters)
+    let unicode_text = "Hello 👋 世界！🎉 こんにちは 🌍 مرحبا";
+    group.throughput(Throughput::Bytes(unicode_text.len() as u64));
+    group.bench_function("encode_unicode_heavy", |b| {
+        b.iter(|| {
+            let _ = encoder.encode(black_box(unicode_text)).unwrap();
+        })
+    });
+
+    // Whitespace variations
+    let whitespace_text = "   word   another\t\tword\n\nmore words   ";
+    group.bench_function("encode_whitespace_heavy", |b| {
+        b.iter(|| {
+            let _ = encoder.encode(black_box(whitespace_text)).unwrap();
+        })
+    });
+
+    // Repeated characters (tests tokenizer merge behavior)
+    let repeated_chars = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    group.bench_function("encode_repeated_chars", |b| {
+        b.iter(|| {
+            let _ = encoder.encode(black_box(repeated_chars)).unwrap();
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, encode, decode, decode_big, encode_batch, encode_edge_cases);
 criterion_main!(benches);
