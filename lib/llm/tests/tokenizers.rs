@@ -18,6 +18,9 @@ use dynamo_llm::tokenizers::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// Additional imports for edge case tests
+use dynamo_llm::tokenizers::{DecodeStream, SequenceDecoderOutput, StopSequenceDecoder};
+
 const TEST_PROMPTS: [&str; 4] = [
     "deep learning is",
     "Deep learning is",
@@ -205,4 +208,332 @@ fn test_decode_with_skip_special_tokens() {
     // Validate exact matches on the entire decoded strings
     assert_eq!(decoded_with_special, "<s> Hello world</s>");
     assert_eq!(decoded_without_special, "Hello world");
+}
+
+// ============================================================================
+// Edge Case Tests for Tokenizers
+// ============================================================================
+
+/// Test encoding an empty string - should produce empty token sequence
+#[test]
+fn test_encode_empty_string() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let encoding = tokenizer.encode("").expect("Failed to encode empty string");
+    assert!(
+        encoding.token_ids().is_empty(),
+        "Empty string should produce empty token sequence"
+    );
+}
+
+/// Test encoding whitespace-only strings
+#[test]
+fn test_encode_whitespace_only() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    // Single space
+    let encoding = tokenizer.encode(" ").expect("Failed to encode single space");
+    // Result depends on tokenizer, just verify it doesn't panic
+
+    // Multiple spaces
+    let encoding = tokenizer
+        .encode("     ")
+        .expect("Failed to encode multiple spaces");
+
+    // Mixed whitespace
+    let encoding = tokenizer
+        .encode("  \t\n  ")
+        .expect("Failed to encode mixed whitespace");
+
+    // Decode should produce valid output
+    let decoded = tokenizer
+        .decode(encoding.token_ids(), false)
+        .expect("Failed to decode whitespace tokens");
+    assert!(!decoded.is_empty() || encoding.token_ids().is_empty());
+}
+
+/// Test encoding Unicode characters (emojis, CJK, Arabic, etc.)
+#[test]
+fn test_encode_unicode_characters() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    // Emoji test
+    let emoji_text = "Hello 👋 World 🌍";
+    let encoding = tokenizer
+        .encode(emoji_text)
+        .expect("Failed to encode emoji text");
+    let decoded = tokenizer
+        .decode(encoding.token_ids(), false)
+        .expect("Failed to decode emoji tokens");
+    // Decoded should preserve the semantic content
+    assert!(decoded.contains("Hello") && decoded.contains("World"));
+
+    // CJK characters
+    let cjk_text = "你好世界";
+    let encoding = tokenizer
+        .encode(cjk_text)
+        .expect("Failed to encode CJK text");
+    assert!(
+        !encoding.token_ids().is_empty(),
+        "CJK text should produce tokens"
+    );
+
+    // Arabic text
+    let arabic_text = "مرحبا بالعالم";
+    let encoding = tokenizer
+        .encode(arabic_text)
+        .expect("Failed to encode Arabic text");
+    assert!(
+        !encoding.token_ids().is_empty(),
+        "Arabic text should produce tokens"
+    );
+}
+
+/// Test batch encoding produces consistent results with single encoding
+#[test]
+fn test_encode_batch_consistency() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let prompts = ["Hello world", "Testing batch", "Consistency check"];
+
+    // Batch encode
+    let batch_encodings = tokenizer
+        .encode_batch(&prompts)
+        .expect("Failed to batch encode");
+
+    // Single encode each and compare
+    for (i, prompt) in prompts.iter().enumerate() {
+        let single_encoding = tokenizer.encode(prompt).expect("Failed to single encode");
+        assert_eq!(
+            batch_encodings[i].token_ids(),
+            single_encoding.token_ids(),
+            "Batch encoding should match single encoding for prompt: {}",
+            prompt
+        );
+    }
+}
+
+/// Test encoding very long strings doesn't cause issues
+#[test]
+fn test_encode_long_string() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    // Create a long string (~100KB)
+    let long_text = "The quick brown fox jumps over the lazy dog. ".repeat(2000);
+
+    let encoding = tokenizer
+        .encode(&long_text)
+        .expect("Failed to encode long string");
+    assert!(
+        !encoding.token_ids().is_empty(),
+        "Long string should produce tokens"
+    );
+    assert!(
+        encoding.token_ids().len() > 1000,
+        "Long string should produce many tokens"
+    );
+
+    // Verify decode is roughly equivalent
+    let decoded = tokenizer
+        .decode(encoding.token_ids(), false)
+        .expect("Failed to decode long string");
+    assert!(
+        decoded.len() > 50000,
+        "Decoded long string should be substantial"
+    );
+}
+
+/// Test encoding strings with special characters and punctuation
+#[test]
+fn test_encode_special_characters() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let special_chars = r#"Special: !@#$%^&*()_+-=[]{}|;':",.<>?/\`~"#;
+    let encoding = tokenizer
+        .encode(special_chars)
+        .expect("Failed to encode special characters");
+    assert!(
+        !encoding.token_ids().is_empty(),
+        "Special characters should produce tokens"
+    );
+
+    // Code-like content
+    let code_content = r#"fn main() { println!("Hello, {}!", name); }"#;
+    let encoding = tokenizer
+        .encode(code_content)
+        .expect("Failed to encode code content");
+    let decoded = tokenizer
+        .decode(encoding.token_ids(), false)
+        .expect("Failed to decode code content");
+    assert!(
+        decoded.contains("fn") && decoded.contains("main"),
+        "Code content should be preserved"
+    );
+}
+
+/// Test encoding strings with repeated characters
+#[test]
+fn test_encode_repeated_characters() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    // Repeated single character
+    let repeated_a = "a".repeat(100);
+    let encoding = tokenizer
+        .encode(&repeated_a)
+        .expect("Failed to encode repeated 'a'");
+    assert!(
+        !encoding.token_ids().is_empty(),
+        "Repeated characters should produce tokens"
+    );
+
+    // Repeated word
+    let repeated_word = "word ".repeat(50);
+    let encoding = tokenizer
+        .encode(&repeated_word)
+        .expect("Failed to encode repeated word");
+    let decoded = tokenizer
+        .decode(encoding.token_ids(), false)
+        .expect("Failed to decode repeated word");
+    // Count occurrences of "word"
+    let word_count = decoded.matches("word").count();
+    assert!(
+        word_count >= 40,
+        "Most repeated words should be preserved: found {}",
+        word_count
+    );
+}
+
+/// Test DecodeStream with incremental token additions
+#[test]
+fn test_decode_stream_incremental() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let shared_tokenizer = Arc::new(tokenizer);
+
+    let text = "This is a test of incremental decoding";
+    let encoding = shared_tokenizer
+        .encode(text)
+        .expect("Failed to encode text");
+
+    let mut decode_stream = DecodeStream::new(shared_tokenizer.clone(), &[], false);
+    let mut accumulated = String::new();
+
+    for &token_id in encoding.token_ids() {
+        if let Some(chunk) = decode_stream.step(token_id).expect("Failed to step") {
+            accumulated.push_str(&chunk);
+        }
+    }
+
+    assert_eq!(
+        accumulated.trim(),
+        text,
+        "Incremental decode should match original"
+    );
+}
+
+/// Test StopSequenceDecoder correctly handles stop tokens
+#[test]
+fn test_stop_sequence_decoder_hidden_stop() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let shared_tokenizer = Arc::new(tokenizer);
+
+    // Build decoder with hidden stop token (EOS = 2 for TinyLlama)
+    let mut decoder = StopSequenceDecoder::builder(shared_tokenizer.clone().into())
+        .add_stop_token_id_hidden(2) // </s> token
+        .build()
+        .expect("Failed to build decoder");
+
+    // Feed some tokens then the stop token
+    let _ = decoder.append_token_id(450); // "The"
+    let _ = decoder.append_token_id(3290); // " cat"
+
+    // Feed the stop token - should stop
+    let result = decoder.append_token_id(2).expect("Failed to append stop token");
+
+    match result {
+        SequenceDecoderOutput::Stopped => {
+            // Expected - stop token is hidden
+        }
+        other => panic!("Expected Stopped, got {:?}", other),
+    }
+
+    assert!(decoder.is_complete(), "Decoder should be marked complete");
+}
+
+/// Test StopSequenceDecoder with visible stop token
+#[test]
+fn test_stop_sequence_decoder_visible_stop() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let shared_tokenizer = Arc::new(tokenizer);
+
+    // Build decoder with visible stop token
+    let mut decoder = StopSequenceDecoder::builder(shared_tokenizer.clone().into())
+        .add_stop_token_id_visible(29889) // "." period token
+        .build()
+        .expect("Failed to build decoder");
+
+    // Feed tokens that form a sentence
+    let _ = decoder.append_token_id(450); // "The"
+    let _ = decoder.append_token_id(6635); // " cat"
+
+    // Feed the stop token - should stop with text
+    let result = decoder
+        .append_token_id(29889)
+        .expect("Failed to append stop token");
+
+    match result {
+        SequenceDecoderOutput::StoppedWithText(text) => {
+            assert!(
+                text.contains("cat") || text.contains("."),
+                "Should contain accumulated text"
+            );
+        }
+        other => panic!("Expected StoppedWithText, got {:?}", other),
+    }
+
+    assert!(decoder.is_complete(), "Decoder should be marked complete");
+}
+
+/// Test encoding/decoding roundtrip for various text types
+#[test]
+fn test_roundtrip_consistency() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load tokenizer");
+
+    let test_cases = vec![
+        "Simple text",
+        "Text with numbers 123 and symbols !@#",
+        "MixedCaseText",
+        "   Padded text   ",
+        "Multi\nline\ntext",
+    ];
+
+    for original in test_cases {
+        let encoding = tokenizer
+            .encode(original)
+            .expect(&format!("Failed to encode: {}", original));
+        let decoded = tokenizer
+            .decode(encoding.token_ids(), false)
+            .expect(&format!("Failed to decode: {}", original));
+
+        // Trimmed versions should be equal (whitespace handling may differ)
+        assert_eq!(
+            decoded.trim(),
+            original.trim(),
+            "Roundtrip failed for: {}",
+            original
+        );
+    }
 }
